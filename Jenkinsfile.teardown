@@ -1,0 +1,83 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(
+            name: 'SATELLITE_ID',
+            defaultValue: 'SAT-01',
+            description: 'Satellite ID to terminate'
+        )
+    }
+
+    environment {
+        REGION = "ap-south-1"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                git branch: 'main',
+                    credentialsId: 'github-user',
+                    url: 'https://github.com/Ahmeds-Devops/satellite-processing-poc.git'
+            }
+        }
+
+        stage('Get Instance ID') {
+            steps {
+                script {
+                    def instanceId = sh(
+                        script: """
+                            aws ssm get-parameter \
+                                --name "/isocs/satellite/${params.SATELLITE_ID}/instance-id" \
+                                --region ${REGION} \
+                                --query 'Parameter.Value' \
+                                --output text
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    echo "Terminating instance: ${instanceId}"
+                    env.INSTANCE_ID = instanceId
+                }
+            }
+        }
+
+        stage('Terminate EC2') {
+            steps {
+                sh """
+                    aws ec2 terminate-instances \
+                        --instance-ids ${env.INSTANCE_ID} \
+                        --region ${REGION}
+                """
+                echo "Waiting for termination..."
+                sh """
+                    aws ec2 wait instance-terminated \
+                        --instance-ids ${env.INSTANCE_ID} \
+                        --region ${REGION}
+                """
+                echo "EC2 terminated"
+            }
+        }
+
+        stage('Cleanup SSM') {
+            steps {
+                sh """
+                    aws ssm delete-parameter \
+                        --name "/isocs/satellite/${params.SATELLITE_ID}/instance-id" \
+                        --region ${REGION}
+                """
+                echo "SSM parameter cleaned up"
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ ${params.SATELLITE_ID} EC2 TERMINATED — Cost = zero"
+        }
+        failure {
+            echo "❌ Teardown FAILED — manually terminate ${env.INSTANCE_ID} in AWS Console"
+        }
+    }
+}
