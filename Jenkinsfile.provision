@@ -34,8 +34,8 @@ pipeline {
     environment {
         REGION        = "ap-south-1"
         AMI_ID        = "ami-0e12ffc2dd465f6e4"
-        SUBNET_ID     = "subnet-0207a1b3ae6df7247"
-        SG_ID         = "sg-0ce1c2916678e29d6"
+        SUBNET_ID     = "subnet-0863964745f3f084d"
+        SG_ID         = "sg-0c5bbd3ff66467d94"
         KEY_NAME      = "satellite-poc-key"
         // INSTANCE_TYPE removed from here — now comes from parameter
     }
@@ -46,7 +46,7 @@ pipeline {
             steps {
                 git branch: 'main',
                     credentialsId: 'github-user',
-                    url: 'https://github.com/Ahmeds-Devops/satellite-processing-poc-1.git'
+                    url: 'https://github.com/vikash123567/Druvaspace-poc.git'
             }
         }
 
