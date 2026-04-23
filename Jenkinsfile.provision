@@ -1,0 +1,184 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(
+            name: 'SATELLITE_ID',
+            defaultValue: 'SAT-01',
+            description: 'Satellite ID'
+        )
+        // ── NEW PARAMS BELOW ──────────────────────────
+        string(
+            name: 'INSTANCE_TYPE',
+            defaultValue: 't3.micro',
+            description: 'EC2 instance type e.g. t3.large, c5.xlarge'
+        )
+        string(
+            name: 'PASS_START_TIME',
+            defaultValue: '',
+            description: 'Pass start time e.g. 2026-04-20T10:15:00Z'
+        )
+        string(
+            name: 'PASS_END_TIME',
+            defaultValue: '',
+            description: 'Pass end time e.g. 2026-04-20T10:27:00Z'
+        )
+        choice(
+            name: 'PROCESSING_SCOPE',
+            choices: ['both', 'encoding', 'decoding'],
+            description: 'Scope of processing'
+        )
+        // ─────────────────────────────────────────────
+    }
+
+    environment {
+        REGION        = "ap-south-1"
+        AMI_ID        = "ami-0e12ffc2dd465f6e4"
+        SUBNET_ID     = "subnet-0207a1b3ae6df7247"
+        SG_ID         = "sg-0ce1c2916678e29d6"
+        KEY_NAME      = "satellite-poc-key"
+        // INSTANCE_TYPE removed from here — now comes from parameter
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                git branch: 'main',
+                    credentialsId: 'github-user',
+                    url: 'https://github.com/Ahmeds-Devops/satellite-processing-poc-1.git'
+            }
+        }
+
+        // ── THIS STAGE UPDATED ────────────────────────
+        stage('Inject Parameters into User Data') {
+            steps {
+                sh """
+                    sed 's/__SATELLITE_ID__/${params.SATELLITE_ID}/g' user_data.sh | \
+                    sed 's/__INSTANCE_TYPE__/${params.INSTANCE_TYPE}/g' | \
+                    sed 's/__PASS_START_TIME__/${params.PASS_START_TIME}/g' | \
+                    sed 's/__PASS_END_TIME__/${params.PASS_END_TIME}/g' | \
+                    sed 's/__PROCESSING_SCOPE__/${params.PROCESSING_SCOPE}/g' \
+                    > user_data_final.sh
+
+                    echo "---- Generated user_data_final.sh ----"
+                    cat user_data_final.sh
+                """
+            }
+        }
+        // ─────────────────────────────────────────────
+
+        stage('Launch EC2') {
+            steps {
+                script {
+                    def instanceId = sh(
+                        script: """
+                            aws ec2 run-instances \
+                                --image-id ${AMI_ID} \
+                                --instance-type ${params.INSTANCE_TYPE} \
+                                --subnet-id ${SUBNET_ID} \
+                                --security-group-ids ${SG_ID} \
+                                --iam-instance-profile Name=satellite-ec2-processing-role \
+                                --key-name ${KEY_NAME} \
+                                --associate-public-ip-address \
+                                --user-data file://user_data_final.sh \
+                                --tag-specifications \
+                                'ResourceType=instance,Tags=[
+                                    {Key=Name,Value=satellite-processing-${params.SATELLITE_ID}},
+                                    {Key=Satellite,Value=${params.SATELLITE_ID}},
+                                    {Key=Scope,Value=${params.PROCESSING_SCOPE}},
+                                    {Key=Environment,Value=poc},
+                                    {Key=ManagedBy,Value=jenkins}
+                                ]' \
+                                --region ${REGION} \
+                                --query 'Instances[0].InstanceId' \
+                                --output text
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    echo "EC2 launched: ${instanceId}"
+
+                    sh """
+                        aws ssm put-parameter \
+                            --name "/isocs/satellite/${params.SATELLITE_ID}/instance-id" \
+                            --value "${instanceId}" \
+                            --type String \
+                            --overwrite \
+                            --region ${REGION}
+                    """
+
+                    env.INSTANCE_ID = instanceId
+                }
+            }
+        }
+
+        stage('Wait for EC2 Status OK') {
+            steps {
+                script {
+                    echo "Waiting for EC2 to be ready..."
+                    sh """
+                        aws ec2 wait instance-status-ok \
+                            --instance-ids ${env.INSTANCE_ID} \
+                            --region ${REGION}
+                    """
+                    echo "EC2 is healthy"
+                }
+            }
+        }
+
+        stage('Wait for Services to Start') {
+            steps {
+                echo "Waiting 3 minutes for Docker and containers to start..."
+                sleep(180)
+            }
+        }
+
+        stage('Verify Containers Running') {
+            steps {
+                script {
+                    def commandId = sh(
+                        script: """
+                            aws ssm send-command \
+                                --instance-ids ${env.INSTANCE_ID} \
+                                --document-name "AWS-RunShellScript" \
+                                --parameters 'commands=[
+                                    "echo --- docker ps output ---",
+                                    "docker ps",
+                                    "echo --- startup log ---",
+                                    "cat /var/log/satellite-startup.log"
+                                ]' \
+                                --region ${REGION} \
+                                --query 'Command.CommandId' \
+                                --output text
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    sleep(30)
+
+                    sh """
+                        aws ssm get-command-invocation \
+                            --command-id ${commandId} \
+                            --instance-id ${env.INSTANCE_ID} \
+                            --region ${REGION} \
+                            --query 'StandardOutputContent' \
+                            --output text
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ SUCCESS — ${params.SATELLITE_ID} | scope: ${params.PROCESSING_SCOPE} | type: ${params.INSTANCE_TYPE}"
+        }
+        failure {
+            echo "❌ FAILED — triggering teardown"
+            build job: 'satellite-teardown',
+                  parameters: [string(name: 'SATELLITE_ID', value: params.SATELLITE_ID)],
+                  wait: false
+        }
+    }
+}
