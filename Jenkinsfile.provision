@@ -7,7 +7,6 @@ pipeline {
             defaultValue: 'SAT-01',
             description: 'Satellite ID'
         )
-        // ── NEW PARAMS BELOW ──────────────────────────
         string(
             name: 'INSTANCE_TYPE',
             defaultValue: 't3.micro',
@@ -28,16 +27,14 @@ pipeline {
             choices: ['both', 'encoding', 'decoding'],
             description: 'Scope of processing'
         )
-        // ─────────────────────────────────────────────
     }
 
     environment {
-        REGION        = "ap-south-1"
-        AMI_ID        = "ami-0e12ffc2dd465f6e4"
-        SUBNET_ID     = "subnet-0863964745f3f084d"
-        SG_ID         = "sg-0c5bbd3ff66467d94"
-        KEY_NAME      = "satellite-poc-key"
-        // INSTANCE_TYPE removed from here — now comes from parameter
+        REGION    = "ap-south-1"
+        AMI_ID    = "ami-0e12ffc2dd465f6e4"
+        SUBNET_ID = "subnet-0863964745f3f084d"
+        SG_ID     = "sg-0c5bbd3ff66467d94"
+        KEY_NAME  = "satellite-poc-key"
     }
 
     stages {
@@ -50,7 +47,6 @@ pipeline {
             }
         }
 
-        // ── THIS STAGE UPDATED ────────────────────────
         stage('Inject Parameters into User Data') {
             steps {
                 sh """
@@ -66,11 +62,21 @@ pipeline {
                 """
             }
         }
-        // ─────────────────────────────────────────────
 
         stage('Launch EC2') {
             steps {
                 script {
+
+                    // ── Write PROVISIONING status before launching ──
+                    sh """
+                        aws ssm put-parameter \
+                            --name "/isocs/satellite/${params.SATELLITE_ID}/status" \
+                            --value '{"status":"PROVISIONING","instanceId":"","privateIp":"","error":""}' \
+                            --type String \
+                            --overwrite \
+                            --region ${REGION}
+                    """
+
                     def instanceId = sh(
                         script: """
                             aws ec2 run-instances \
@@ -99,10 +105,21 @@ pipeline {
 
                     echo "EC2 launched: ${instanceId}"
 
+                    // ── Store instance ID ──
                     sh """
                         aws ssm put-parameter \
                             --name "/isocs/satellite/${params.SATELLITE_ID}/instance-id" \
                             --value "${instanceId}" \
+                            --type String \
+                            --overwrite \
+                            --region ${REGION}
+                    """
+
+                    // ── Update status to STARTING with instance ID ──
+                    sh """
+                        aws ssm put-parameter \
+                            --name "/isocs/satellite/${params.SATELLITE_ID}/status" \
+                            --value '{"status":"STARTING","instanceId":"${instanceId}","privateIp":"","error":""}' \
                             --type String \
                             --overwrite \
                             --region ${REGION}
@@ -122,7 +139,31 @@ pipeline {
                             --instance-ids ${env.INSTANCE_ID} \
                             --region ${REGION}
                     """
-                    echo "EC2 is healthy"
+
+                    // ── Get private IP ──
+                    def privateIp = sh(
+                        script: """
+                            aws ec2 describe-instances \
+                                --instance-ids ${env.INSTANCE_ID} \
+                                --region ${REGION} \
+                                --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+                                --output text
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    env.PRIVATE_IP = privateIp
+                    echo "EC2 is healthy. Private IP: ${privateIp}"
+
+                    // ── Update status to READY with private IP ──
+                    sh """
+                        aws ssm put-parameter \
+                            --name "/isocs/satellite/${params.SATELLITE_ID}/status" \
+                            --value '{"status":"READY","instanceId":"${env.INSTANCE_ID}","privateIp":"${privateIp}","error":""}' \
+                            --type String \
+                            --overwrite \
+                            --region ${REGION}
+                    """
                 }
             }
         }
@@ -172,9 +213,20 @@ pipeline {
 
     post {
         success {
-            echo "✅ SUCCESS — ${params.SATELLITE_ID} | scope: ${params.PROCESSING_SCOPE} | type: ${params.INSTANCE_TYPE}"
+            echo "✅ SUCCESS — ${params.SATELLITE_ID} | scope: ${params.PROCESSING_SCOPE} | type: ${params.INSTANCE_TYPE} | IP: ${env.PRIVATE_IP}"
         }
         failure {
+            script {
+                // ── Write FAILED status so status API returns correct response ──
+                sh """
+                    aws ssm put-parameter \
+                        --name "/isocs/satellite/${params.SATELLITE_ID}/status" \
+                        --value '{"status":"FAILED","instanceId":"","privateIp":"","error":"Pipeline failed - check Jenkins logs for ${params.SATELLITE_ID}"}' \
+                        --type String \
+                        --overwrite \
+                        --region ${REGION}
+                """
+            }
             echo "❌ FAILED — triggering teardown"
             build job: 'satellite-teardown',
                   parameters: [string(name: 'SATELLITE_ID', value: params.SATELLITE_ID)],
