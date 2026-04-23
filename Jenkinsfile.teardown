@@ -39,6 +39,16 @@ pipeline {
 
                     echo "Terminating instance: ${instanceId}"
                     env.INSTANCE_ID = instanceId
+
+                    // ── Write TERMINATING status ──
+                    sh """
+                        aws ssm put-parameter \
+                            --name "/isocs/satellite/${params.SATELLITE_ID}/status" \
+                            --value '{"status":"TERMINATING","instanceId":"${instanceId}","privateIp":"","error":""}' \
+                            --type String \
+                            --overwrite \
+                            --region ${REGION}
+                    """
                 }
             }
         }
@@ -62,12 +72,26 @@ pipeline {
 
         stage('Cleanup SSM') {
             steps {
-                sh """
-                    aws ssm delete-parameter \
-                        --name "/isocs/satellite/${params.SATELLITE_ID}/instance-id" \
-                        --region ${REGION}
-                """
-                echo "SSM parameter cleaned up"
+                script {
+                    // ── Delete instance ID parameter ──
+                    sh """
+                        aws ssm delete-parameter \
+                            --name "/isocs/satellite/${params.SATELLITE_ID}/instance-id" \
+                            --region ${REGION}
+                    """
+                    echo "Instance ID parameter cleaned up"
+
+                    // ── Write TERMINATED status (keep for audit) ──
+                    sh """
+                        aws ssm put-parameter \
+                            --name "/isocs/satellite/${params.SATELLITE_ID}/status" \
+                            --value '{"status":"TERMINATED","instanceId":"","privateIp":"","error":""}' \
+                            --type String \
+                            --overwrite \
+                            --region ${REGION}
+                    """
+                    echo "Status updated to TERMINATED"
+                }
             }
         }
     }
