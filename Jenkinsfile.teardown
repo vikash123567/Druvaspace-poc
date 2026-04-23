@@ -19,7 +19,7 @@ pipeline {
             steps {
                 git branch: 'main',
                     credentialsId: 'github-user',
-                    url: 'https://github.com/Ahmeds-Devops/satellite-processing-poc.git'
+                    url: 'https://github.com/vikash123567/Druvaspace-poc.git'
             }
         }
 
